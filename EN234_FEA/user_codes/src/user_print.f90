@@ -17,7 +17,7 @@ subroutine user_print(n_steps)
   integer ::  n_state_vars_per_intpt                                         ! No. state variables per integration point
   real (prec) ::   vol_averaged_strain(6)                                    ! Volume averaged strain in an element
   real (prec), allocatable ::   vol_averaged_state_variables(:)              ! Volume averaged state variables in an element
-
+  real (prec) :: vol_averaged_stress(6)
 
 
 !
@@ -40,30 +40,30 @@ subroutine user_print(n_steps)
    lmn = int(user_print_parameters(1))     ! The element number
 
    call compute_element_volume_average_3D(lmn,vol_averaged_strain,vol_averaged_state_variables,length_state_variable_array, &
-                                                       n_state_vars_per_intpt)
+                                                       n_state_vars_per_intpt, vol_averaged_stress)
 
 
-    if (TIME<1.d-12) then
-      if (n_state_vars_per_intpt<6) then
-        write(user_print_units(1),'(A)') 'VARIABLES = TIME,e11,e22,e33,e12,e13,e23'
-      else
+   ! if (TIME<1.d-12) then
+   !   if (n_state_vars_per_intpt<6) then
+   !     write(user_print_units(1),'(A)') 'VARIABLES = TIME,e11,e22,e33,e12,e13,e23'
+   !   else
          write(user_print_units(1),'(A)') 'VARIABLES = TIME,e11,e22,e33,e12,e13,e23,s11,s22,s33,s12,s13,s23'
-      endif
-    endif
+   !   endif
+   ! endif
 
-   if (n_state_vars_per_intpt<6) then
-      write(user_print_units(1),'(7(1x,D12.5))') TIME+DTIME,vol_averaged_strain(1:6)
-   else
-      vol_averaged_state_variables(1:3) = vol_averaged_state_variables(1:3) + vol_averaged_state_variables(7)
-      write(user_print_units(1),'(13(1x,D12.5))') TIME+DTIME,vol_averaged_strain(1:6),vol_averaged_state_variables(1:6)
-   endif
+  ! if (n_state_vars_per_intpt<6) then
+  !    write(user_print_units(1),'(7(1x,D12.5))') TIME+DTIME,vol_averaged_strain(1:6)
+  ! else
+  !    vol_averaged_state_variables(1:3) = vol_averaged_state_variables(1:3) + vol_averaged_state_variables(7)
+      write(user_print_units(1),'(13(1x,D12.5))') TIME+DTIME,vol_averaged_strain(1:6),vol_averaged_stress(1:6)
+  ! endif
 
 
 
 end subroutine user_print
 
 subroutine compute_element_volume_average_3D(lmn,vol_averaged_strain,vol_averaged_state_vars,length_output_array, &
-                                                                                                       n_state_vars_per_intpt)
+                                                                             n_state_vars_per_intpt, vol_averaged_stress)
     use Types
     use ParamIO
     use Mesh, only : extract_element_data
@@ -85,8 +85,9 @@ subroutine compute_element_volume_average_3D(lmn,vol_averaged_strain,vol_average
     real (prec), intent( out )  ::  vol_averaged_strain(6)
     real (prec), intent( out )  ::  vol_averaged_state_vars(length_output_array)
 
-    integer, intent( out )      :: n_state_vars_per_intpt
 
+    integer, intent( out )      :: n_state_vars_per_intpt
+    real (prec), intent( out )  ::  vol_averaged_stress(6)
     ! Local variables
 
     integer    :: node_identifier                              ! Flag identifying node type
@@ -116,6 +117,8 @@ subroutine compute_element_volume_average_3D(lmn,vol_averaged_strain,vol_average
     real (prec)  ::  strain(6)                         ! Strain vector contains [e11, e22, e33, 2e12, 2e13, 2e23]
     real (prec)  ::  dstrain(6)                        ! Strain increment vector
     real (prec)  ::  dxidx(3,3), determinant           ! Jacobian inverse and determinant
+    real (prec)  :: stress(6)
+    real (prec)  :: D(6,6)
     !
     !  Allocate memory to store element data.
     !  The variables specifying the size of the arrays are stored in the module user_subroutine_storage
@@ -157,6 +160,7 @@ subroutine compute_element_volume_average_3D(lmn,vol_averaged_strain,vol_average
 
     vol_averaged_strain = 0.d0
     vol_averaged_state_vars = 0.d0
+    vol_averaged_stress = 0.d0
     el_vol = 0.d0
     n_state_vars_per_intpt = n_state_variables/n_points
 
@@ -190,6 +194,10 @@ subroutine compute_element_volume_average_3D(lmn,vol_averaged_strain,vol_average
 
         vol_averaged_strain(1:6) = vol_averaged_strain(1:6) + (strain(1:6)+dstrain(1:6))*w(kint)*determinant
 
+        call hypoelasticmaterial(strain+dstrain,element_properties,n_properties,stress,D)
+
+        vol_averaged_stress(1:6) = vol_averaged_stress(1:6) + stress(1:6)*w(kint)*determinant
+
         if (n_state_vars_per_intpt>0) then
            vol_averaged_state_vars(1:n_state_vars_per_intpt) = vol_averaged_state_vars(1:n_state_vars_per_intpt) &
                               + updated_state_variables(iof:iof+n_state_vars_per_intpt-1)*w(kint)*determinant
@@ -201,7 +209,7 @@ subroutine compute_element_volume_average_3D(lmn,vol_averaged_strain,vol_average
 
     vol_averaged_strain = vol_averaged_strain/el_vol
     vol_averaged_state_vars = vol_averaged_state_vars/el_vol
-
+    vol_averaged_stress = vol_averaged_stress/el_vol
     deallocate(node_list)
     deallocate(element_properties)
     deallocate(initial_state_variables)
@@ -218,7 +226,7 @@ subroutine compute_element_volume_average_3D(lmn,vol_averaged_strain,vol_average
 
 end subroutine compute_element_volume_average_3D
 
-subroutine compute_J_integral(area_integral_option,Width,Height,J_integral_value)
+subroutine compute_J_integral(J_integral_value)
     use Types
     use ParamIO
     use Mesh, only : extract_element_data
@@ -235,15 +243,11 @@ subroutine compute_J_integral(area_integral_option,Width,Height,J_integral_value
     use Element_Utilities, only : invert_small
     implicit none
 
-    integer, intent ( in )      :: area_integral_option                                    ! Element number
-
-    real (prec), intent( in )   :: Width
-    real (prec), intent( in )   :: Height
-
     real (prec), intent( out )  ::  J_integral_value
 
+
     ! Local variables
-    integer    :: n_points
+
     integer    :: node_identifier                              ! Flag identifying node type
     integer    :: element_identifier                           ! Flag identifying element type (specified in .in file)
     integer    :: n_nodes                                      ! # nodes on the element
@@ -255,6 +259,7 @@ subroutine compute_J_integral(area_integral_option,Width,Height,J_integral_value
     integer      :: status
     integer      :: iof
     integer      :: lmn               ! Element number
+    integer      :: lmn_start,lmn_end ! First and last crack tip element
     integer      :: i                 ! Loop counter
 
 !   The arrays below have to be given dimensions large enough to store the data. It doesnt matter if they are too large.
@@ -268,16 +273,7 @@ subroutine compute_J_integral(area_integral_option,Width,Height,J_integral_value
     real( prec ), allocatable   :: x(:,:)                                  ! Nodal coords x(i,a) is ith coord of ath node
     real( prec ), allocatable   :: dof_increment(:)                        ! DOF increment, using usual element storage convention
     real( prec ), allocatable   :: dof_total(:)                            ! accumulated DOF, using usual element storage convention
-    real( prec ), allocatable   :: nodal_q(:)                              ! Nodal values of q
-    real (prec)  ::  strain(3), dstrain(3)                                 ! Strain vector contains [e11, e22, e33, 2e12, 2e13, 2e23]
-    real (prec)  ::  stress(3)
-    real (prec)  ::  D(3,3)                                                ! stress = D*(strain+dstrain)  (NOTE FACTOR OF 2 in shear strain)
-    real( prec ) :: element_coords(length_coord_array)
-    real (prec)  :: E, xnu, D44, D11, D12
-    real (prec), allocatable  :: rpol
-    real (prec)  :: du2dx2(1)
-    real (prec)  :: rval(1,1:8)
-    real (prec)  :: top(1,1:8), bottom(1,1:8)
+
     real (prec), allocatable  ::  B(:,:)                                   ! strain = B*(dof_total+dof_increment)
     !
     !
@@ -285,9 +281,6 @@ subroutine compute_J_integral(area_integral_option,Width,Height,J_integral_value
     !  They specify the array dimensions required to store the relevant variables for _any_ element or node in the mesh
     !  The actual data will vary depending on the element or node selected
     !
-    logical      :: strcmp
-    integer      :: kint,k
-    real (prec)  ::  dxidx(2,2), determinant
     allocate(node_list(length_node_array), stat=status)
     allocate(element_properties(length_property_array), stat=status)
     allocate(initial_state_variables(length_state_variable_array), stat=status)
@@ -295,66 +288,15 @@ subroutine compute_J_integral(area_integral_option,Width,Height,J_integral_value
     allocate(x(2,length_coord_array/2), stat=status)
     allocate(dof_increment(length_dof_array), stat=status)
     allocate(dof_total(length_dof_array), stat=status)
-    allocate(nodal_q(length_node_array), stat=status)
     allocate(B(3,length_dof_array), stat=status)
 
   !  Write your code to calculate the J integral here
-           ! Material properties
-    !
-    !     Subroutine to compute element stiffness matrix and residual force vector for 3D linear elastic elements
-    !     El props are:
 
-    !     element_properties(1)         Young's modulus
-    !     element_properties(2)         Poisson's ratio
-
-    n_points = 9
-    n_nodes = 8
-
-    x = reshape(element_coords,(/2,length_coord_array/2/))
-
-    call initialize_integration_points(n_points, n_nodes, xi, w)
-
-    rpol = 0.0006d0
-    D = 0.d0
-    E = element_properties(1)
-    xnu = element_properties(2)
-    !d44 = 0.5D0*E/(1+xnu)
-    d11 = (1.D0-xnu)*E/( (1+xnu)*(1-2.D0*xnu) )
-    d12 = xnu*E/( (1+xnu)*(1-2.D0*xnu) )
-    d44 = E/( 2.D0*(1+xnu) )
-    D(1,2) = d12
-    D(2,1) = d12
-    D(1,1) = d11
-    D(2,2) = d11
-    D(3,1) = 0.d0
-    D(3,2) = 0.d0
-    D(1,3) = 0.d0
-    D(2,3) = 0.d0
-    D(3,3) = d44
-
-    !     --  Loop over integration points
-    do kint = 1, n_points
-        call calculate_shapefunctions(xi(1:2,kint),n_nodes,N,dNdxi)
-        dxdxi = matmul(x(1:2,1:n_nodes),dNdxi(1:n_nodes,1:2))
-        call invert_small(dxdxi,dxidx,determinant)
-        dNdx(1:n_nodes,1:2) = matmul(dNdxi(1:n_nodes,1:2),dxidx)
-        B = 0.d0
-        B(1,1:2*n_nodes-1:2) = dNdx(1:n_nodes,1)
-        B(2,2:2*n_nodes:2) = dNdx(1:n_nodes,2)
-        B(3,1:2*n_nodes-1:2)   = dNdx(1:n_nodes,2)
-        B(3,2:2*n_nodes:2)   = dNdx(1:n_nodes,1)
-
-        strain = matmul(B,dof_total)
-        dstrain = matmul(B,dof_increment)
-
-        stress = matmul(D,strain+dstrain)
-        du2dx2 = strain(2)
-
-!       J_integral_value = -(0.5)*(2*matmul(stress,dudx2) -matmul(stress,strain))*w(kint)*determinant
-
-        end do
-
-
+  !  You will need to loop over the crack tip elements, and sum the contribution to the J integral from each element.
+  !
+  !  You can access the first and last crack tip element using
+  !    lmn_start = zone_list(2)%start_element
+  !    lmn_end = zone_list(2)%end_element
 
   !  The two subroutines below extract data for elements and nodes (see module Mesh.f90 for the source code for these subroutines)
 
@@ -376,7 +318,6 @@ subroutine compute_J_integral(area_integral_option,Width,Height,J_integral_value
     deallocate(x)
     deallocate(dof_increment)
     deallocate(dof_total)
-    deallocate(nodal_q)
     deallocate(B)
 
 
@@ -386,4 +327,3 @@ subroutine compute_J_integral(area_integral_option,Width,Height,J_integral_value
 
 
 end subroutine compute_J_integral
-
