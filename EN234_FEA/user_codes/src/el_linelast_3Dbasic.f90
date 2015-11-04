@@ -56,29 +56,34 @@ subroutine el_linelast_3dbasic(lmn, element_identifier, n_nodes, node_property_l
           
 
     ! Local Variables
-    integer      :: n_points,kint
+    integer      :: n_points,kint, i
 
     real (prec)  ::  strain(6), dstrain(6)           ! Strain vector contains [ep11, ep22, ep33, 2ep12, 2ep13, 2ep23]
     real (prec)  ::  stress(6)                         ! Stress vector contains [s11, s22, s33, s12, s13, s23]
     real (prec)  ::  D(6,6)                            ! stress = D*(strain+dstrain)  (NOTE FACTOR OF 2 in shear strain)
-
+    real (prec)  ::  F_ij(3,3), J, F_inv(3,3)
+    real (prec)  ::  G(6,9)
     real (prec)  ::  B(6,length_dof_array)             ! strain = B*(dof_total+dof_increment)
-    real (prec)  :: Bbar(6,length_dof_array)
+    real (prec)  ::  Bstar(9,length_dof_array)
     real (prec)  ::  dxidx(3,3), determinant           ! Jacobian inverse and determinant
     real (prec)  ::  x(3,length_coord_array/3)         ! Re-shaped coordinate array x(i,a) is ith coord of ath node
-    real (prec)  :: elvol
+    real (prec)  ::  dNdy(length_dof_array,3)
+    real (prec)  ::  Sigma(length_dof_array,length_dof_array)
+    real (prec)  ::  Svec(length_dof_array), Pvec(length_dof_array), S(3,length_coord_array/3)
+    real (prec)  ::  Smat(length_dof_array,length_dof_array)
+    real (prec)  ::  Pmat(length_dof_array,length_dof_array)
+    real (prec)  ::  u_ia(3,length_dof_array/3)
     !     Subroutine to compute element stiffness matrix and residual force vector for 3D linear elastic elements
     !     El props are:
 
-    !     element_properties(1)         sigma zero
-    !     element_properties(2)         epsilon zero
-    !     element_properties(3)         n
-    !     element_properties(4)         K
+    !     element_properties(1)         mu
+    !     element_properties(2)         K
+
     fail = .false.
     
     x = reshape(element_coords,(/3,length_coord_array/3/))
-    !hypo_n = 10.d0
-    !K_in = 1000.d0
+    u_ia = reshape(dof_total+dof_increment,(/3,length_coord_array/3/))
+
     if (n_nodes == 4) n_points = 1
     if (n_nodes == 10) n_points = 4
     if (n_nodes == 8) n_points = 8
@@ -86,21 +91,10 @@ subroutine el_linelast_3dbasic(lmn, element_identifier, n_nodes, node_property_l
 
     call initialize_integration_points(n_points, n_nodes, xi, w)
 
-    dNbardx = 0.d0
-    do kint = 1, n_points
-        call calculate_shapefunctions(xi(1:3,kint),n_nodes,N,dNdxi)
-        dxdxi = matmul(x(1:3,1:n_nodes),dNdxi(1:n_nodes,1:3))
-        call invert_small(dxdxi,dxidx,determinant)
-        dNdx(1:n_nodes,1:3) = matmul(dNdxi(1:n_nodes,1:3),dxidx)
-        dNbardx(1:n_nodes,1:3) = dNdx*w(kint)*determinant
-        elvol = w(kint)*determinant
-    end do
-    ! calculate the element volume
-    dNbardx = dNbardx/elvol
-
     element_residual = 0.d0
     element_stiffness = 0.d0
-
+    F_ij = 0.d0
+    dNdy = 0.d0
 
     !     --  Loop over integration points
     do kint = 1, n_points
@@ -108,47 +102,58 @@ subroutine el_linelast_3dbasic(lmn, element_identifier, n_nodes, node_property_l
         dxdxi = matmul(x(1:3,1:n_nodes),dNdxi(1:n_nodes,1:3))
         call invert_small(dxdxi,dxidx,determinant)
         dNdx(1:n_nodes,1:3) = matmul(dNdxi(1:n_nodes,1:3),dxidx)
-        !write(6,*) 'dNdx = ', dNdx
+
+        F_ij = matmul(u_ia(1:3,1:n_nodes),dNdx(1:n_nodes,1:3))
+        F_ij(1,1) = F_ij(1,1) + 1.d0
+        F_ij(2,2) = F_ij(2,2) + 1.d0
+        F_ij(3,3) = F_ij(3,3) + 1.d0
+
+        call invert_small(F_ij,F_inv,J)
+        dNdy(1:n_nodes,1:3) = matmul(dNdx(1:n_nodes,1:3),F_inv(1:3,1:3))
+
         B = 0.d0
-        B(1,1:3*n_nodes-2:3) = dNdx(1:n_nodes,1)
-        B(2,2:3*n_nodes-1:3) = dNdx(1:n_nodes,2)
-        B(3,3:3*n_nodes:3)   = dNdx(1:n_nodes,3)
-        B(4,1:3*n_nodes-2:3) = dNdx(1:n_nodes,2)
-        B(4,2:3*n_nodes-1:3) = dNdx(1:n_nodes,1)
-        B(5,1:3*n_nodes-2:3) = dNdx(1:n_nodes,3)
-        B(5,3:3*n_nodes:3)   = dNdx(1:n_nodes,1)
-        B(6,2:3*n_nodes-1:3) = dNdx(1:n_nodes,3)
-        B(6,3:3*n_nodes:3)   = dNdx(1:n_nodes,2)
-        !write(6,*) 'B = ', B
-        Bbar = 0.d0
-        Bbar(1,1:3*n_nodes-2:3) = B(1,1:3*n_nodes-2:3) + 0.33D0*(dNbardx(1:n_nodes,1) -dNdx(1:n_nodes,1))
-        Bbar(1,2:3*n_nodes-1:3) = B(1,2:3*n_nodes-1:3) + 0.33D0*(dNbardx(1:n_nodes,2)-dNdx(1:n_nodes,2))
-        Bbar(1,3:3*n_nodes:3) = B(1,3:3*n_nodes:3) + 0.33D0*(dNbardx(1:n_nodes,3)-dNdx(1:n_nodes,3))
-        Bbar(2,1:3*n_nodes-2:3) = B(2,1:3*n_nodes-2:3) + 0.33D0*(dNbardx(1:n_nodes,1) -dNdx(1:n_nodes,1))
-        Bbar(2,2:3*n_nodes-1:3) = B(2,2:3*n_nodes-1:3) + 0.33D0*(dNbardx(1:n_nodes,2)-dNdx(1:n_nodes,2))
-        Bbar(2,3:3*n_nodes:3) = B(2,3:3*n_nodes:3) + 0.33D0*(dNbardx(1:n_nodes,3)-dNdx(1:n_nodes,3))
-        Bbar(3,1:3*n_nodes-2:3) = B(3,1:3*n_nodes-2:3) + 0.33D0*(dNbardx(1:n_nodes,1) -dNdx(1:n_nodes,1))
-        Bbar(3,2:3*n_nodes-1:3) = B(3,2:3*n_nodes-1:3) + 0.33D0*(dNbardx(1:n_nodes,2)-dNdx(1:n_nodes,2))
-        Bbar(3,3:3*n_nodes:3) = B(3,3:3*n_nodes:3) + 0.33D0*(dNbardx(1:n_nodes,3)-dNdx(1:n_nodes,3))
-        Bbar(4,1:3*n_nodes-2:3) = B(4,1:3*n_nodes-2:3)
-        Bbar(4,2:3*n_nodes-1:3) = B(4,2:3*n_nodes-1:3)
-        Bbar(5,1:3*n_nodes-2:3) = B(5,1:3*n_nodes-2:3)
-        Bbar(5,3:3*n_nodes:3)   = B(5,3:3*n_nodes:3)
-        Bbar(6,2:3*n_nodes-1:3) = B(6,2:3*n_nodes-1:3)
-        Bbar(6,3:3*n_nodes:3)   = B(6,3:3*n_nodes:3)
-        !write(6,*) 'bbar = ', Bbar
-        !write(6,*) 'dofs = ', dof_total
-        !write(6,*) 'dof is = ', dof_increment
-        strain = matmul(B,dof_total)
-        dstrain = matmul(B,dof_increment)
+        B(1,1:3*n_nodes-2:3) = dNdy(1:n_nodes,1)
+        B(2,2:3*n_nodes-1:3) = dNdy(1:n_nodes,2)
+        B(3,3:3*n_nodes:3)   = dNdy(1:n_nodes,3)
+        B(4,1:3*n_nodes-2:3) = dNdy(1:n_nodes,2)
+        B(4,2:3*n_nodes-1:3) = dNdy(1:n_nodes,1)
+        B(5,1:3*n_nodes-2:3) = dNdy(1:n_nodes,3)
+        B(5,3:3*n_nodes:3)   = dNdy(1:n_nodes,1)
+        B(6,2:3*n_nodes-1:3) = dNdy(1:n_nodes,3)
+        B(6,3:3*n_nodes:3)   = dNdy(1:n_nodes,2)
 
-        !stress = matmul(D,strain+dstrain)
-        call hypoelasticmaterial(strain+dstrain,element_properties,n_properties,stress,D)
+        Bstar = 0.d0
+        ! all for B star
+        Bstar(1,1:3*n_nodes-2:3) = dNdy(1:n_nodes,1)
+        Bstar(2,2:3*n_nodes-1:3) = dNdy(1:n_nodes,2)
+        Bstar(3,3:3*n_nodes:3)   = dNdy(1:n_nodes,3)
+        Bstar(4,1:3*n_nodes-2:3) = dNdy(1:n_nodes,2)
+        Bstar(5,2:3*n_nodes-1:3) = dNdy(1:n_nodes,1)
+        Bstar(6,1:3*n_nodes-2:3) = dNdy(1:n_nodes,3)
+        Bstar(7,3:3*n_nodes:3)   = dNdy(1:n_nodes,1)
+        Bstar(8,2:3*n_nodes-1:3) = dNdy(1:n_nodes,3)
+        Bstar(9,3:3*n_nodes:3)   = dNdy(1:n_nodes,2)
 
+        call hyperelasticmaterial(F_ij,element_properties,n_properties,stress,D,G)
+        ! now we have B, G, D, and Bstar
+        ! now we need sigma
+
+        Sigma = 0.d0
+        S = reshape(matmul(transpose(B),stress),(/3,length_dof_array/3/))
+        do i = 1,n_nodes
+            Pvec = reshape(spread(transpose(dNdx(i:i,1:3)),dim=2,ncopies=n_nodes),(/3*n_nodes/))
+            Pmat(3*i-2:3*i,1:3*n_nodes) = spread(Pvec,dim=1,ncopies=3)
+            Svec = reshape(spread(S(1:3,i:i),dim=2,ncopies=n_nodes),(/3*n_nodes/))
+            Smat(3*i-2:3*i,1:3*n_nodes) = spread(Svec,dim=1,ncopies=3)
+        end do
+        Sigma = Pmat*transpose(Smat)
+
+        ! calculate residual (same as before) and stiffness (has sigma now)
         element_residual(1:3*n_nodes) = element_residual(1:3*n_nodes) - matmul(transpose(B),stress)*w(kint)*determinant
 
         element_stiffness(1:3*n_nodes,1:3*n_nodes) = element_stiffness(1:3*n_nodes,1:3*n_nodes) &
-            + matmul(transpose(B(1:6,1:3*n_nodes)),matmul(D,B(1:6,1:3*n_nodes)))*w(kint)*determinant
+            + matmul(matmul(transpose(B(1:6,1:3*n_nodes)),D(1:6,1:6)),matmul(G(1:6,1:9),Bstar(1:9,1:3*n_nodes))) &
+            *w(kint)*determinant - Sigma*w(kint)*determinant
 
     end do
 
@@ -333,25 +338,34 @@ subroutine fieldvars_linelast_3dbasic(lmn, element_identifier, n_nodes, node_pro
     ! Local Variables
     logical      :: strcmp
   
-    integer      :: n_points,kint,k
+    integer      :: n_points,kint,k, i
 
     real (prec)  ::  strain(6), dstrain(6)             ! Strain vector contains [e11, e22, e33, 2e12, 2e13, 2e23]
     real (prec)  ::  stress(6)                         ! Stress vector contains [s11, s22, s33, s12, s13, s23]
     real (prec)  ::  sdev(6)                           ! Deviatoric stress
     real (prec)  ::  D(6,6)                            ! stress = D*(strain+dstrain)  (NOTE FACTOR OF 2 in shear strain)
     real (prec)  ::  B(6,length_dof_array)             ! strain = B*(dof_total+dof_increment)
-    real (prec)  :: Bbar(6,length_dof_array)
     real (prec)  ::  dxidx(3,3), determinant           ! Jacobian inverse and determinant
     real (prec)  ::  x(3,length_coord_array/3)         ! Re-shaped coordinate array x(i,a) is ith coord of ath node
-    real (prec)  :: elvol
-    real (prec)  :: p, smises                          ! Pressure and Mises stress
+    real (prec)  ::  p, smises, J                      ! Pressure and Mises stress
+    real (prec)  ::  F_ij(3,3), F_inv(3,3)
+    real (prec)  ::  u_ia(3,length_coord_array/3)
+    real (prec)  ::  G(6,9)
+    real (prec)  ::  dNdy(length_dof_array,3)
+    real (prec)  ::  Bstar(9,length_dof_array)
+    real (prec)  ::  Sigma(length_dof_array,length_dof_array)
+    real (prec)  ::  Svec(length_dof_array), Pvec(length_dof_array), S(3,length_coord_array/3)
+    real (prec)  ::  Smat(length_dof_array,length_dof_array)
+    real (prec)  ::  Pmat(length_dof_array,length_dof_array)
+
     !
     !     Subroutine to compute element contribution to project element integration point data to nodes
 
-    !     element_properties(1)         Young's modulus
-    !     element_properties(2)         Poisson's ratio
+    !     element_properties(1)         mu
+    !     element_properties(2)         K
 
     x = reshape(element_coords,(/3,length_coord_array/3/))
+    u_ia = reshape(dof_total+dof_increment,(/3,length_coord_array/3/))
 
     if (n_nodes == 4) n_points = 1
     if (n_nodes == 10) n_points = 4
@@ -359,19 +373,6 @@ subroutine fieldvars_linelast_3dbasic(lmn, element_identifier, n_nodes, node_pro
     if (n_nodes == 20) n_points = 27
 
     call initialize_integration_points(n_points, n_nodes, xi, w)
-
-    dNbardx = 0.d0
-    do kint = 1, n_points
-        call calculate_shapefunctions(xi(1:3,kint),n_nodes,N,dNdxi)
-        dxdxi = matmul(x(1:3,1:n_nodes),dNdxi(1:n_nodes,1:3))
-        call invert_small(dxdxi,dxidx,determinant)
-        dNdx(1:n_nodes,1:3) = matmul(dNdxi(1:n_nodes,1:3),dxidx)
-        dNbardx(1:n_nodes,1:3) = dNdx*w(kint)*determinant
-        elvol = w(kint)*determinant
-    end do
-    ! calculate the element volume
-    !write(6,*) 'dof_array = ', dof_array
-    dNbardx = dNbardx/elvol
 
     nodal_fieldvariables = 0.d0
 
@@ -381,39 +382,50 @@ subroutine fieldvars_linelast_3dbasic(lmn, element_identifier, n_nodes, node_pro
         dxdxi = matmul(x(1:3,1:n_nodes),dNdxi(1:n_nodes,1:3))
         call invert_small(dxdxi,dxidx,determinant)
         dNdx(1:n_nodes,1:3) = matmul(dNdxi(1:n_nodes,1:3),dxidx)
-        B = 0.d0
-        B(1,1:3*n_nodes-2:3) = dNdx(1:n_nodes,1)
-        B(2,2:3*n_nodes-1:3) = dNdx(1:n_nodes,2)
-        B(3,3:3*n_nodes:3)   = dNdx(1:n_nodes,3)
-        B(4,1:3*n_nodes-2:3) = dNdx(1:n_nodes,2)
-        B(4,2:3*n_nodes-1:3) = dNdx(1:n_nodes,1)
-        B(5,1:3*n_nodes-2:3) = dNdx(1:n_nodes,3)
-        B(5,3:3*n_nodes:3)   = dNdx(1:n_nodes,1)
-        B(6,2:3*n_nodes-1:3) = dNdx(1:n_nodes,3)
-        B(6,3:3*n_nodes:3)   = dNdx(1:n_nodes,2)
-        Bbar = 0.d0
-        Bbar(1,1:3*n_nodes-2:3) = B(1,1:3*n_nodes-2:3) + 0.3333D0*(dNbardx(1:n_nodes,1) -dNdx(1:n_nodes,1))
-        Bbar(1,2:3*n_nodes-1:3) = B(1,2:3*n_nodes-1:3) + 0.3333D0*(dNbardx(1:n_nodes,2)-dNdx(1:n_nodes,2))
-        Bbar(1,3:3*n_nodes:3) = B(1,3:3*n_nodes:3) + 0.3333D0*(dNbardx(1:n_nodes,3)-dNdx(1:n_nodes,3))
-        Bbar(2,1:3*n_nodes-2:3) = B(2,1:3*n_nodes-2:3) + 0.3333D0*(dNbardx(1:n_nodes,1) -dNdx(1:n_nodes,1))
-        Bbar(2,2:3*n_nodes-1:3) = B(2,2:3*n_nodes-1:3) + 0.3333D0*(dNbardx(1:n_nodes,2)-dNdx(1:n_nodes,2))
-        Bbar(2,3:3*n_nodes:3) = B(2,3:3*n_nodes:3) + 0.3333D0*(dNbardx(1:n_nodes,3)-dNdx(1:n_nodes,3))
-        Bbar(3,1:3*n_nodes-2:3) = B(3,1:3*n_nodes-2:3) + 0.3333D0*(dNbardx(1:n_nodes,1) -dNdx(1:n_nodes,1))
-        Bbar(3,2:3*n_nodes-1:3) = B(3,2:3*n_nodes-1:3) + 0.3333D0*(dNbardx(1:n_nodes,2)-dNdx(1:n_nodes,2))
-        Bbar(3,3:3*n_nodes:3) = B(3,3:3*n_nodes:3) + 0.3333D0*(dNbardx(1:n_nodes,3)-dNdx(1:n_nodes,3))
-        !Bbar(2,2:3*n_nodes-1:3) = B(2,2:3*n_nodes-1:3) + 0.33D0*(dNbardx(1:n_nodes,2)-dNdx(1:n_nodes,2))
-        !Bbar(3,3:3*n_nodes:3)   = B(3,3:3*n_nodes:3) + 0.33D0*(dNbardx(1:n_nodes,3)-dNdx(1:n_nodes,3))
-        Bbar(4,1:3*n_nodes-2:3) = B(4,1:3*n_nodes-2:3)
-        Bbar(4,2:3*n_nodes-1:3) = B(4,2:3*n_nodes-1:3)
-        Bbar(5,1:3*n_nodes-2:3) = B(5,1:3*n_nodes-2:3)
-        Bbar(5,3:3*n_nodes:3)   = B(5,3:3*n_nodes:3)
-        Bbar(6,2:3*n_nodes-1:3) = B(6,2:3*n_nodes-1:3)
-        Bbar(6,3:3*n_nodes:3)   = B(6,3:3*n_nodes:3)
 
-        strain = matmul(B,dof_total)
-        dstrain = matmul(B,dof_increment)
-        call hypoelasticmaterial(strain+dstrain,element_properties,n_properties,stress,D)
-        !stress = matmul(D,strain+dstrain)
+        F_ij = matmul(u_ia(1:3,1:n_nodes),dNdx(1:n_nodes,1:3))
+        F_ij(1,1) = F_ij(1,1) + 1.d0
+        F_ij(2,2) = F_ij(2,2) + 1.d0
+        F_ij(3,3) = F_ij(3,3) + 1.d0
+
+        call invert_small(F_ij,F_inv,J)
+        dNdy = matmul(dNdx(1:n_nodes,1:3),F_inv(1:3,1:3))
+
+        B = 0.d0
+        B(1,1:3*n_nodes-2:3) = dNdy(1:n_nodes,1)
+        B(2,2:3*n_nodes-1:3) = dNdy(1:n_nodes,2)
+        B(3,3:3*n_nodes:3)   = dNdy(1:n_nodes,3)
+        B(4,1:3*n_nodes-2:3) = dNdy(1:n_nodes,2)
+        B(4,2:3*n_nodes-1:3) = dNdy(1:n_nodes,1)
+        B(5,1:3*n_nodes-2:3) = dNdy(1:n_nodes,3)
+        B(5,3:3*n_nodes:3)   = dNdy(1:n_nodes,1)
+        B(6,2:3*n_nodes-1:3) = dNdy(1:n_nodes,3)
+        B(6,3:3*n_nodes:3)   = dNdy(1:n_nodes,2)
+
+        Bstar = 0.d0
+        ! all for B star
+        Bstar(1,1:3*n_nodes-2:3) = dNdy(1:n_nodes,1)
+        Bstar(2,2:3*n_nodes-1:3) = dNdy(1:n_nodes,2)
+        Bstar(3,3:3*n_nodes:3)   = dNdy(1:n_nodes,3)
+        Bstar(4,1:3*n_nodes-2:3) = dNdy(1:n_nodes,2)
+        Bstar(5,2:3*n_nodes-1:3) = dNdy(1:n_nodes,1)
+        Bstar(6,1:3*n_nodes-2:3) = dNdy(1:n_nodes,3)
+        Bstar(7,3:3*n_nodes:3)   = dNdy(1:n_nodes,1)
+        Bstar(8,2:3*n_nodes-1:3) = dNdy(1:n_nodes,3)
+        Bstar(9,3:3*n_nodes:3)   = dNdy(1:n_nodes,2)
+
+        call hyperelasticmaterial(F_ij,element_properties,n_properties,stress,D,G)
+
+        Sigma = 0.d0
+        S = reshape(matmul(transpose(B),stress),(/3,length_dof_array/3/))
+        do i = 1,n_nodes
+            Pvec = reshape(spread(transpose(dNdx(i:i,1:3)),dim=2,ncopies=n_nodes),(/3*n_nodes/))
+            Pmat(3*i-2:3*i,1:3*n_nodes) = spread(Pvec,dim=1,ncopies=3)
+            Svec = reshape(spread(S(1:3,i:i),dim=2,ncopies=n_nodes),(/3*n_nodes/))
+            Smat(3*i-2:3*i,1:3*n_nodes) = spread(Svec,dim=1,ncopies=3)
+        end do
+        Sigma = Pmat*transpose(Smat)
+
         p = sum(stress(1:3))/3.d0
         sdev = stress
         sdev(1:3) = sdev(1:3)-p
@@ -583,3 +595,131 @@ subroutine hypoelasticmaterial(strain,element_properties,n_properties,stress,D)
 
     return
  end subroutine hypoelasticmaterial
+
+subroutine hyperelasticmaterial(F_ij,element_properties,n_properties,stress,D,G)
+
+    use Types
+    use ParamIO
+    use Element_Utilities, only : invert_small
+    implicit none
+
+    integer, intent (in) :: n_properties
+
+    real (prec), intent (in) :: F_ij(3,3)
+    real (prec), intent (in) :: element_properties(n_properties)
+
+    real (prec), intent (out) :: stress(6)
+    real (prec), intent (out) :: D(6,6)
+    real (prec), intent (out) :: G(6,9)
+
+    real (prec)  ::  mu, Kbulk                         ! Material properties
+    real (prec)  :: I_vec(6)
+    real (prec)  :: dy1(6,6)
+    real (prec)  :: dy2(6,6)
+    real (prec)  :: dy3(6,6)
+    real (prec)  :: B_ij(3,3)
+    real (prec)  :: B_vec(6)
+    real (prec)  :: B_ij_inv(3,3), B_vec_inv(6)
+    real (prec)  :: J, det1
+    real (prec)  :: B_nn, B_kk
+    real (prec)  :: F_inv(3,3)
+
+    mu = element_properties(1)
+    Kbulk = element_properties(2)
+
+    I_vec(1) = 1.d0
+    I_vec(2) = 1.d0
+    I_vec(3) = 1.d0
+    I_vec(4) = 0.d0
+    I_vec(5) = 0.d0
+    I_vec(6) = 0.d0
+
+    ! Find J
+    call invert_small(F_ij,F_inv,J)
+    ! Find B_ij
+    B_ij = matmul(F_ij,transpose(F_ij))
+    ! Find B_vec_inv
+    call invert_small(B_ij,B_ij_inv,det1)
+    ! Make into B_vec
+    B_vec(1) = B_ij(1,1)
+    B_vec(2) = B_ij(2,2)
+    B_vec(3) = B_ij(3,3)
+    B_vec(4) = B_ij(1,2)
+    B_vec(5) = B_ij(1,3)
+    B_vec(6) = B_ij(2,3)
+    ! Trace
+    B_kk = B_vec(1) + B_vec(2) + B_vec(3)
+
+    ! Stress
+    stress = 0.d0
+    stress(1) = (mu/J**(5.d0/3.d0))*(B_vec(1)-0.333333d0*B_kk)+Kbulk*(J-1.d0)
+    stress(2) = (mu/J**(5.d0/3.d0))*(B_vec(2)-0.333333d0*B_kk)+Kbulk*(J-1.d0)
+    stress(3) = (mu/J**(5.d0/3.d0))*(B_vec(3)-0.333333d0*B_kk)+Kbulk*(J-1.d0)
+    stress(4) = (mu/J**(5.d0/3.d0))*B_vec(4)
+    stress(5) = (mu/J**(5.d0/3.d0))*B_vec(5)
+    stress(6) = (mu/J**(5.d0/3.d0))*B_vec(6)
+    stress = stress*J
+
+    B_vec_inv = 0.d0
+    B_vec_inv(1) = B_ij_inv(1,1)
+    B_vec_inv(2) = B_ij_inv(2,2)
+    B_vec_inv(3) = B_ij_inv(3,3)
+    B_vec_inv(4) = B_ij_inv(1,2)
+    B_vec_inv(5) = B_ij_inv(1,3)
+    B_vec_inv(6) = B_ij_inv(2,3)
+
+    ! calculate the dyadic products
+    ! I dyadic B_inv
+    dy1 = spread(I_vec,dim=2,ncopies=6)*spread(B_vec_inv,dim=1,ncopies=6)
+    ! I dyadic I
+    ! this is just I*transpose(I)
+    ! or
+    dy2 = 0.d0
+    dy2(1:3,1:3)=1.d0
+    ! B_vec dyadic B_vec_inv
+    dy3 = spread(B_vec,dim=2,ncopies=6)*spread(B_vec_inv,dim=1,ncopies=6)
+
+    ! Find Bnn, ************** is this right?
+    B_nn = B_vec(1) + B_vec(2) + B_vec(3)
+    ! Set up D
+    D = 0.d0
+    D = mu/(3.d0*J**(2.d0/3.d0))*((B_nn/3.d0)*dy1-dy2-dy3)+Kbulk*J*(J-1.d0/2.d0)*dy1
+    D(1,1) = D(1,1) + mu/J**(2.d0/3.d0)
+    D(2,2) = D(2,2) + mu/J**(2.d0/3.d0)
+    D(3,3) = D(3,3) + mu/J**(2.d0/3.d0)
+    D(4,4) = D(4,4) + 0.5d0*mu/J**(2.d0/3.d0)
+    D(5,5) = D(5,5) + 0.5d0*mu/J**(2.d0/3.d0)
+    D(6,6) = D(6,6) + 0.5d0*mu/J**(2.d0/3.d0)
+
+        G = 0.d0
+        G(1,1) = 2.d0*B_ij(1,1)
+        G(1,4) = 2.d0*B_ij(1,2)
+        G(1,6) = 2.d0*B_ij(1,3)
+        G(2,2) = 2.d0*B_ij(2,2)
+        G(2,5) = 2.d0*B_ij(1,2)
+        G(2,8) = 2.d0*B_ij(2,3)
+        G(3,3) = 2.d0*B_ij(3,3)
+        G(3,7) = 2.d0*B_ij(1,3)
+        G(3,9) = 2.d0*B_ij(1,3)
+        G(4,1) = 2.d0*B_ij(1,2)
+        G(4,2) = 2.d0*B_ij(1,2)
+        G(4,4) = 2.d0*B_ij(2,2)
+        G(4,5) = 2.d0*B_ij(1,1)
+        G(4,6) = 2.d0*B_ij(2,3)
+        G(4,8) = 2.d0*B_ij(1,3)
+        G(5,1) = 2.d0*B_ij(1,3)
+        G(5,3) = 2.d0*B_ij(1,3)
+        G(5,4) = 2.d0*B_ij(2,3)
+        G(5,6) = 2.d0*B_ij(3,3)
+        G(5,7) = 2.d0*B_ij(1,1)
+        G(5,8) = 2.d0*B_ij(1,2)
+        G(6,2) = 2.d0*B_ij(2,3)
+        G(6,3) = 2.d0*B_ij(2,3)
+        G(6,5) = 2.d0*B_ij(1,3)
+        G(6,7) = 2.d0*B_ij(1,2)
+        G(6,8) = 2.d0*B_ij(3,3)
+        G(6,9) = 2.d0*B_ij(2,2)
+
+
+    return
+ end subroutine hyperelasticmaterial
